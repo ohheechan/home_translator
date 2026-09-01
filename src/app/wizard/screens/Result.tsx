@@ -6,6 +6,8 @@ import type { BaseProfile, UserProfile } from "../../../types/profile";
 import { evaluateProgram, type TrackEvaluation } from "../../../engine/eligibility";
 import { computeScore } from "../../../engine/scoring";
 import { presentTrackResult, type PresentedResult } from "../../../engine/present";
+import { matchLoanProducts } from "../../../engine/loan-match";
+import type { LoanMatchResult } from "../../../types/loan";
 
 interface Props {
   state: WizardState;
@@ -78,6 +80,43 @@ function ResultCard({ result, rank }: { result: PresentedResult; rank: number })
   );
 }
 
+function LoanCard({ match }: { match: LoanMatchResult }) {
+  const { product, fit, reasons } = match;
+  return (
+    <div className="card">
+      <div className="row" style={{ alignItems: "baseline", justifyContent: "space-between" }}>
+        <strong style={{ fontSize: 15 }}>{product.name}</strong>
+        <span className={`badge ${fit === "가능성 높음" ? "badge-pass" : "badge-warn"}`}>{fit}</span>
+      </div>
+      <p style={{ margin: "4px 0 10px", fontSize: 13, color: "#6b7570" }}>{product.summary}</p>
+      <div className="checklist-item">
+        <div>
+          <div>대상</div>
+          <div className="detail">{product.targetNote}</div>
+        </div>
+      </div>
+      <div className="checklist-item">
+        <div>
+          <div>대출한도</div>
+          <div className="detail">{product.loanLimitNote}</div>
+        </div>
+      </div>
+      {reasons.map((r, i) => (
+        <p key={i} className="hint" style={{ marginTop: i === 0 ? 10 : 4 }}>
+          {r}
+        </p>
+      ))}
+      <p className="hint" style={{ marginTop: 10 }}>
+        {product.asOf} 조사 기준 참고용 정보예요. 정확한 최신 조건·금리는{" "}
+        <a href={product.officialUrl} target="_blank" rel="noreferrer">
+          {product.agency}
+        </a>
+        에서 다시 확인하세요.
+      </p>
+    </div>
+  );
+}
+
 export default function Result({ state, goTo, onRestart }: Props) {
   const program = state.doc?.program;
   const medianIncomeTable = state.doc?.medianIncomeTable;
@@ -106,6 +145,11 @@ export default function Result({ state, goTo, onRestart }: Props) {
 
     return { presented, hasScoreInput: !!state.detail.birthDate };
   }, [program, medianIncomeTable, state.base, state.detail, state.desiredAreaM2, state.desiredSupplyMethod]);
+
+  const loanMatches = useMemo(() => {
+    if (!isCompleteBaseProfile(state.base)) return null;
+    return matchLoanProducts(state.base, state.detail);
+  }, [state.base, state.detail]);
 
   if (!program || !evaluation) {
     return (
@@ -145,6 +189,19 @@ export default function Result({ state, goTo, onRestart }: Props) {
         <button className="btn btn-secondary" onClick={() => goTo("score-detail")}>
           배점 세부정보 수정하기
         </button>
+      )}
+
+      {loanMatches && loanMatches.length > 0 && (
+        <div style={{ marginTop: 28 }}>
+          <h2>참고할 수 있는 정책대출</h2>
+          <p className="lead" style={{ marginBottom: 14 }}>
+            당첨 시 전세보증금 마련에 참고할 수 있는 주택도시기금 전세자금대출이에요. 입력하신
+            정보만으로는 정확한 대출 자격을 확정할 수 없어 가능성만 보여드려요.
+          </p>
+          {loanMatches.map((m) => (
+            <LoanCard key={m.product.id} match={m} />
+          ))}
+        </div>
       )}
 
       <p className="disclaimer">

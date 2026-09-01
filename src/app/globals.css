@@ -272,6 +272,10 @@ input[type="file"] {
   margin-top: 18px;
 }
 
+a {
+  color: var(--brand);
+}
+
 .error-box {
   background: #fbeaea;
   color: var(--fail);
