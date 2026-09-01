@@ -1,0 +1,366 @@
+From 750dadf722a3193206e27b7e421fd559d8ef73f3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 1 Sep 2026 05:16:18 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?=EC=A0=95=EC=B1=85=EB=8C=80=EC=B6=9C=202?=
+ =?UTF-8?q?=EC=A2=85=20=EC=B6=94=EA=B0=80:=20=EC=8B=A0=EC=83=9D=EC=95=84?=
+ =?UTF-8?q?=ED=8A=B9=EB=A1=80=20=EB=B2=84=ED=8C=80=EB=AA=A9,=20=EC=A4=91?=
+ =?UTF-8?q?=EC=86=8C=EA=B8=B0=EC=97=85=EC=B7=A8=EC=97=85=EC=B2=AD=EB=85=84?=
+ =?UTF-8?q?=20=EC=A0=84=EC=84=B8=EC=9E=90=EA=B8=88=EB=8C=80=EC=B6=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 신생아특례는 배점 세부정보의 출생자녀 수(2023.3.28 이후 기준)가 0명이면
+  이 상품 기준일(2023.1.1. 이후)로도 0명이 확정이므로 안전하게 배제, 그
+  외에는 "확인 필요"로 남김(대출 신청일 기준 2년 이내라는 별도 시점 기준
+  때문에 정확한 판정은 못 함)
+- 중기청은 재직 정보를 아예 안 받으므로 항상 "확인 필요" 이상은 못 줌
+- 맞벌이 여부(Profile1에서 항상 입력받는 확정 필드)에 따른 소득기준 완화를
+  반영하는 incomeCapManwonDualIncome 필드 추가
+---
+ src/data/loan-products.ts | 32 ++++++++++++++++++++++++++++++
+ src/engine/loan-match.ts  | 41 +++++++++++++++++++++++++++++++++++----
+ src/types/loan.ts         | 11 +++++++++--
+ 3 files changed, 78 insertions(+), 6 deletions(-)
+
+diff --git a/src/data/loan-products.ts b/src/data/loan-products.ts
+index 69380d2..b88075f 100644
+--- a/src/data/loan-products.ts
++++ b/src/data/loan-products.ts
+@@ -60,4 +60,36 @@ export const LOAN_PRODUCTS: LoanProduct[] = [
+     officialUrl: "https://nhuf.molit.go.kr",
+     asOf: "2026-09-01",
+   },
++  {
++    id: "beotimok-newborn",
++    name: "신생아 특례 버팀목전세자금대출",
++    agency: "주택도시기금 (취급은행: 우리·국민·신한·농협·하나은행)",
++    summary: "최근 2년 내 자녀를 출산·입양한 가구를 위한 대폭 확대된 한도의 전세자금대출",
++    targetNote: "대출접수일 기준 2년 이내 자녀를 출산(2023.1.1. 이후 출생, 입양 포함)한 무주택 세대주",
++    incomeCapManwon: 13_000,
++    incomeCapManwonDualIncome: 20_000,
++    incomeCapNote: "맞벌이는 2억원까지 완화(단, 부부 중 한 명은 1억 3천만원 이하여야 함)",
++    netAssetCapManwon: 34_500,
++    loanLimitNote: "임차보증금의 80% 이내, 호당 최대 2억 4천만원",
++    officialUrl: "https://nhuf.molit.go.kr",
++    asOf: "2026-09-01",
++  },
++  {
++    id: "jungsokiup-youth",
++    name: "중소기업취업청년 전세자금대출",
++    agency: "주택도시기금 (취급은행: 우리·국민·신한·농협·하나은행 등)",
++    summary: "중소·중견기업 재직 청년을 위한 낮은 금리의 전세자금대출(이른바 '중기청')",
++    targetNote: "만 19~34세(병역 이행 시 최대 39세) 무주택 세대주로 중소·중견기업 재직자 또는 정부지원 청년창업자",
++    minAge: 19,
++    maxAge: 34,
++    incomeCapManwon: 3_500,
++    incomeCapManwonDualIncome: 5_000,
++    incomeCapNote: "단독세대주/외벌이 3,500만원, 맞벌이는 5,000만원까지 완화",
++    netAssetCapManwon: 36_100,
++    loanLimitNote: "최대 1억원(재직 1년 미만이면 2천만원 이하로 제한될 수 있음), 임차보증금 2억원 이하 주택 대상",
++    depositCapManwon: 20_000,
++    note: "순자산 기준은 조사 시점 자료 특성상 다른 상품보다 오래된 값(2023년 조사분)일 수 있어요 — 최신 금액은 꼭 재확인하세요.",
++    officialUrl: "https://nhuf.molit.go.kr",
++    asOf: "2026-09-01",
++  },
+ ];
+diff --git a/src/engine/loan-match.ts b/src/engine/loan-match.ts
+index 06883db..3959dff 100644
+--- a/src/engine/loan-match.ts
++++ b/src/engine/loan-match.ts
+@@ -59,11 +59,40 @@ function evaluateProduct(
+     }
+   }
+ 
+-  // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준 ──
++  // ── 신생아특례: 출산 시점 정보가 없으면 확정 배제도 확정 충족도 못 한다. 단,
++  //     배점 세부정보에서 "2023.3.28. 이후 출생 자녀 0명"이라고 입력했다면 — 이
++  //     상품의 기준일(2023.1.1.)보다도 늦은 기준으로도 0명이라는 뜻이라 신생아특례
++  //     기준(2023.1.1. 이후)도 당연히 0명 → 확정 배제해도 안전하다. ──
++  if (product.id === "beotimok-newborn") {
++    if (detail?.newbornChildAdjustment?.childrenBornAfter20230328 === 0) {
++      return null;
++    }
++    if (!detail?.newbornChildAdjustment || detail.newbornChildAdjustment.childrenBornAfter20230328 > 0) {
++      reasons.push(
++        "대출접수일 기준 2년 이내 출산·입양했는지는 입력하신 정보만으로 확인할 수 없어요(배점 세부정보의 출생자녀 수와는 기준 시점이 달라요).",
++      );
++      fit = "확인 필요";
++    }
++  }
++
++  // ── 중기청: 중소·중견기업 재직 여부는 이 서비스가 아예 입력받지 않는 항목이라
++  //     항상 확인 필요로 남긴다 — "가능성 높음"까지는 절대 못 준다. ──
++  if (product.id === "jungsokiup-youth") {
++    reasons.push("중소·중견기업 재직 여부(또는 청년창업 여부)는 이 서비스에서 입력받지 않아 확인할 수 없어요.");
++    fit = "확인 필요";
++  }
++
++  // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준. 맞벌이 완화
++  //     상한이 있는 상품은 dualIncome(Profile1에서 항상 입력받는 확정 필드)에
++  //     따라 적용할 상한 자체를 바꾼다. ──
++  const applicableIncomeCapManwon =
++    base.dualIncome && product.incomeCapManwonDualIncome !== undefined
++      ? product.incomeCapManwonDualIncome
++      : product.incomeCapManwon;
+   const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
+-  if (householdAnnualIncomeManwon > product.incomeCapManwon) {
++  if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
+     reasons.push(
+-      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(product.incomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
++      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
+     );
+     fit = "확인 필요";
+   }
+@@ -77,8 +106,12 @@ function evaluateProduct(
+     fit = "확인 필요";
+   }
+ 
++  if (product.note) {
++    reasons.push(product.note);
++  }
++
+   if (fit === "가능성 높음") {
+-    reasons.push("입력하신 정보 기준으로는 기본 요건에 부합해 보여요.");
++    reasons.unshift("입력하신 정보 기준으로는 기본 요건에 부합해 보여요.");
+   }
+ 
+   return { product, fit, reasons };
+diff --git a/src/types/loan.ts b/src/types/loan.ts
+index 12f3f4b..1820ddb 100644
+--- a/src/types/loan.ts
++++ b/src/types/loan.ts
+@@ -23,9 +23,13 @@ export interface LoanProduct {
+   maxAge?: number;
+   /** "혼인 또는 3개월 이내 혼인예정" 요건이 있는 상품(신혼부부전용류)만 표시 */
+   requiresNewlywedOrEngaged?: boolean;
+-  /** 부부(또는 단독세대주) 합산 연소득 상한. 만원 단위. */
++  /** 부부(또는 단독세대주) 합산 연소득 상한. 만원 단위. 맞벌이 완화 기준이 없는
++   *  상품은 이 값 하나만 쓴다(단독세대주/외벌이 기준과 같다고 가정). */
+   incomeCapManwon: number;
+-  /** 2자녀 이상 가구 등 완화 조건이 있으면 참고용 문구로만 덧붙인다(판정에는 안 씀). */
++  /** BaseProfile.dualIncome이 true일 때 incomeCapManwon 대신 쓰는 완화된 상한.
++   *  맞벌이 여부는 Profile1 화면에서 항상 입력받는 필드라 100% 확정 판단 가능하다. */
++  incomeCapManwonDualIncome?: number;
++  /** 2자녀 이상 가구 등 그 외 완화 조건이 있으면 참고용 문구로만 덧붙인다(판정에는 안 씀). */
+   incomeCapNote?: string;
+   /** 순자산 상한. 만원 단위. */
+   netAssetCapManwon: number;
+@@ -37,6 +41,9 @@ export interface LoanProduct {
+   /** 이 데이터를 조사한 기준일. YYYY-MM-DD. 화면에 "OO 기준" 형태로 노출해
+    *  오래된 데이터를 최신인 것처럼 보여주지 않는다. */
+   asOf: string;
++  /** 자산기준 산정연도가 다르다는 등, 위 필드로 못 담는 개별 캐비어트. 카드에
++   *  힌트 한 줄로 그대로 노출한다. */
++  note?: string;
+ }
+ 
+ export type LoanFitLevel = "가능성 높음" | "확인 필요";
+-- 
+2.43.0
+
+From e77d241fc2b00b2d0a96be017e2f79d34d367824 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 1 Sep 2026 05:31:46 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?=EC=A0=95=EC=B1=85=EB=8C=80=EC=B6=9C=20?=
+ =?UTF-8?q?=ED=92=80=20=ED=99=95=EC=9E=A5:=20=EC=86=8C=EB=93=9D=EB=AC=B4?=
+ =?UTF-8?q?=EC=83=81=ED=95=9C=20HF=EB=B3=B4=EC=A6=9D=20+=20=EC=84=9C?=
+ =?UTF-8?q?=EC=9A=B8=EC=8B=9C=20=EC=9D=B4=EC=9E=90=EC=A7=80=EC=9B=90=202?=
+ =?UTF-8?q?=EC=A2=85=20=EC=B6=94=EA=B0=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+소득 수준에 따라 실제로 갈리는 추천이 되려면 상품 풀이 좁아선 안 된다는
+피드백에 따라, 버팀목 계열 소득기준을 넘는 고소득 가구를 위한 일반전세
+자금보증(HF, 소득 제한 없음)과, 버팀목과 별도로 중복 신청 가능한 서울시
+신혼부부/청년 임차보증금 이자지원 2종을 추가. 총 5개 → 8개 상품.
+
+- LoanProduct의 incomeCapManwon/netAssetCapManwon을 optional로 변경해
+  "상한 자체가 없는 상품"을 매칭 로직에서 안전하게 표현(해당 축 스킵).
+- 전세사기피해자/비정상거처 이주지원 대출은 소득·자산이 아닌 별도 공적
+  확인서로만 판가름 나고 신뢰할 수 있는 수치도 찾지 못해, 카드로 만들지
+  않고 Result 화면 안내 문구로만 존재를 알림(추정치 조작 방지 원칙).
+---
+ src/app/wizard/screens/Result.tsx | 10 ++++--
+ src/data/loan-products.ts         | 53 +++++++++++++++++++++++++++++++
+ src/engine/loan-match.ts          | 34 ++++++++++++--------
+ src/types/loan.ts                 | 12 ++++---
+ 4 files changed, 89 insertions(+), 20 deletions(-)
+
+diff --git a/src/app/wizard/screens/Result.tsx b/src/app/wizard/screens/Result.tsx
+index 3e9d45b..9f0ea25 100644
+--- a/src/app/wizard/screens/Result.tsx
++++ b/src/app/wizard/screens/Result.tsx
+@@ -195,12 +195,18 @@ export default function Result({ state, goTo, onRestart }: Props) {
+         <div style={{ marginTop: 28 }}>
+           <h2>참고할 수 있는 정책대출</h2>
+           <p className="lead" style={{ marginBottom: 14 }}>
+-            당첨 시 전세보증금 마련에 참고할 수 있는 주택도시기금 전세자금대출이에요. 입력하신
+-            정보만으로는 정확한 대출 자격을 확정할 수 없어 가능성만 보여드려요.
++            당첨 시 전세보증금 마련에 참고할 수 있는 정책대출·이자지원이에요. 입력하신 정보만으로는
++            정확한 대출 자격을 확정할 수 없어 가능성만 보여드려요.
+           </p>
+           {loanMatches.map((m) => (
+             <LoanCard key={m.product.id} match={m} />
+           ))}
++          <p className="hint">
++            이 외에 전세사기 피해자, 비정상거처(옛 위험건축물) 거주자를 위한 전용 대출도 있어요.
++            둘 다 소득·자산이 아니라 별도 공적 확인서(피해자 결정통지서 등)로만 대상 여부가 갈려서
++            이 서비스로는 판단할 수 없어요 — 해당될 수 있다면 은행 또는 주택도시기금(1566-9009)에
++            직접 문의해보세요.
++          </p>
+         </div>
+       )}
+ 
+diff --git a/src/data/loan-products.ts b/src/data/loan-products.ts
+index b88075f..19b8a39 100644
+--- a/src/data/loan-products.ts
++++ b/src/data/loan-products.ts
+@@ -14,6 +14,21 @@ import type { LoanProduct } from "../types/loan";
+  * 했다 — design doc 06장이 이 서비스가 지원하는 청약 유형 전체(분양 포함)를
+  * 염두에 두고 그 둘까지 나열했지만, 실제 구현 범위(SH 장기전세주택)에 맞지
+  * 않는 상품을 보여주면 오히려 오해를 준다.
++ *
++ * 풀을 "소득 수준별로 실제 갈리는" 상품까지 넓히기 위해 주택도시기금(버팀목
++ * 계열) 소득기준을 넘는 가구를 위한 소득 무상한 상품(HF 일반전세자금보증)과,
++ * 이 서비스 사용자가 전부 서울 거주자라는 전제(자치구 선택 화면 자체가
++ * 서울 25개구뿐)로 항상 적용 대상인 서울시 자체 이자지원 사업 2종도 포함한다
++ * — 이 둘은 버팀목 대출과 별도로 "같이" 받을 수 있는 것도 있어(loanLimitNote에
++ * 명시) 단순 대체재가 아니라 풀을 넓히는 진짜 선택지다.
++ *
++ * 전세사기피해자 전용/비정상거처(옛 위험건축물) 이주지원 버팀목대출도 실존
++ * 하지만, 이 둘은 애초에 소득·자산이 아니라 "공식 피해자 결정통지서"·"비정상
++ * 거처 확인서" 같은 사전 행정 절차로만 판가름 나서 이 서비스가 입력받는 어떤
++ * 항목으로도 대상 여부를 전혀 좁힐 수 없고, 여러 출처를 뒤져도 신뢰할 만한
++ * 소득·한도 숫자를 확인하지 못했다 — 숫자를 지어내느니 카드로 만들지 않고
++ * Result 화면에 짧은 안내 문구로만 존재를 알린다(추정치를 실제 조건처럼
++ * 보여주는 게 더 나쁘다는 이 프로젝트의 원칙).
+  */
+ export const LOAN_PRODUCTS: LoanProduct[] = [
+   {
+@@ -92,4 +107,42 @@ export const LOAN_PRODUCTS: LoanProduct[] = [
+     officialUrl: "https://nhuf.molit.go.kr",
+     asOf: "2026-09-01",
+   },
++  {
++    id: "hf-general-guarantee",
++    name: "일반전세자금보증(HF, 소득 제한 없음)",
++    agency: "한국주택금융공사(HF) — 시중은행 전세대출에 붙는 보증",
++    summary: "버팀목 계열 소득기준을 넘는 가구도 쓸 수 있는, 소득 상한이 없는 일반 은행 전세대출용 보증",
++    targetNote: "무주택 세대주(1주택자는 보증한도가 줄어듦) — 소득 상한은 없지만 은행 자체 심사(신용도·DTI 등)를 통과해야 실행돼요",
++    loanLimitNote: "임차보증금 수도권 7억원 이하(지방 5억원 이하) 주택 대상, 무주택자는 최대 4억원까지 보증(1주택자는 2억원)",
++    note: "버팀목 계열처럼 정부가 직접 소득기준을 두는 상품이 아니라, 은행이 시중금리로 빌려주는 전세대출에 HF가 보증을 서는 구조예요 — 그래서 금리가 버팀목 계열보다 높을 수 있어요.",
++    officialUrl: "https://www.hf.go.kr",
++    asOf: "2026-09-01",
++  },
++  {
++    id: "seoul-newlywed-interest-support",
++    name: "서울시 신혼부부 임차보증금 이자지원",
++    agency: "서울특별시 (전월세보증금지원센터, 02-2133-1200)",
++    summary: "서울시가 전세자금대출 이자를 보전해주는 신혼부부 전용 지원 — 버팀목 등 다른 전세자금대출과 별도로 신청 가능",
++    targetNote: "혼인신고일 기준 7년 이내(또는 추천서 신청일로부터 6개월 내 결혼예정)인 무주택 부부, 서울시 거주",
++    requiresNewlywedOrEngaged: true,
++    incomeCapManwon: 13_000,
++    incomeCapNote: "부부합산 기준",
++    loanLimitNote: "임차보증금 7억원 이하 주택 대상, 최대 3억원(보증금의 90% 이내) 대출분에 대해 연 1.0~3.0% 이자를 서울시가 지원(신혼예정 +0.2%p, 자녀 +0.5~1.5%p 추가 우대, 최대 연 4.5%까지)",
++    note: "부부당 생애 1회, 신랑·신부 중 1명만 신청할 수 있어요.",
++    officialUrl: "https://housing.seoul.go.kr/site/main/content/sh01_0400800",
++    asOf: "2026-09-01",
++  },
++  {
++    id: "seoul-youth-interest-support",
++    name: "서울시 청년 임차보증금 이자지원",
++    agency: "서울특별시 (전월세보증금지원센터, 02-2133-1200)",
++    summary: "서울시가 전세자금대출 이자를 보전해주는 청년 전용 지원 — 버팀목 등 다른 전세자금대출과 별도로 신청 가능",
++    targetNote: "만 19~39세 무주택 청년, 서울시 거주",
++    minAge: 19,
++    maxAge: 39,
++    incomeCapManwon: 5_000,
++    loanLimitNote: "최대 2억원(보증금의 90% 이내) 대출분에 대해 연 2.0% 이자를 서울시가 지원, 계약기간에 따라 최대 8년까지 연장 가능",
++    officialUrl: "https://housing.seoul.go.kr/site/main/content/sh01_040901",
++    asOf: "2026-09-01",
++  },
+ ];
+diff --git a/src/engine/loan-match.ts b/src/engine/loan-match.ts
+index 3959dff..1dc8dc3 100644
+--- a/src/engine/loan-match.ts
++++ b/src/engine/loan-match.ts
+@@ -84,26 +84,32 @@ function evaluateProduct(
+ 
+   // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준. 맞벌이 완화
+   //     상한이 있는 상품은 dualIncome(Profile1에서 항상 입력받는 확정 필드)에
+-  //     따라 적용할 상한 자체를 바꾼다. ──
++  //     따라 적용할 상한 자체를 바꾼다. incomeCapManwon 자체가 없는 상품(예: HF
++  //     일반전세자금보증)은 소득 상한이 없다는 뜻이라 이 축을 건너뛴다. ──
+   const applicableIncomeCapManwon =
+     base.dualIncome && product.incomeCapManwonDualIncome !== undefined
+       ? product.incomeCapManwonDualIncome
+       : product.incomeCapManwon;
+-  const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
+-  if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
+-    reasons.push(
+-      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
+-    );
+-    fit = "확인 필요";
++  if (applicableIncomeCapManwon !== undefined) {
++    const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
++    if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
++      reasons.push(
++        `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
++      );
++      fit = "확인 필요";
++    }
+   }
+ 
+-  // ── 자산: 총자산(상한선 역할) vs 상품의 순자산 기준 ──
+-  const totalAssetManwon = base.totalAssetWon / 10_000;
+-  if (totalAssetManwon > product.netAssetCapManwon) {
+-    reasons.push(
+-      `총자산 ${fmtManwon(totalAssetManwon)}이 순자산 기준 ${fmtManwon(product.netAssetCapManwon)}을 넘어요 — 이 상품 기준은 총자산에서 부채를 뺀 순자산으로 보므로, 부채가 있다면 실제로는 충족할 수 있어요.`,
+-    );
+-    fit = "확인 필요";
++  // ── 자산: 총자산(상한선 역할) vs 상품의 순자산 기준. netAssetCapManwon이
++  //     없는 상품은 자산 상한이 없거나(HF) 공식 수치를 못 찾은 것이라 건너뛴다 ──
++  if (product.netAssetCapManwon !== undefined) {
++    const totalAssetManwon = base.totalAssetWon / 10_000;
++    if (totalAssetManwon > product.netAssetCapManwon) {
++      reasons.push(
++        `총자산 ${fmtManwon(totalAssetManwon)}이 순자산 기준 ${fmtManwon(product.netAssetCapManwon)}을 넘어요 — 이 상품 기준은 총자산에서 부채를 뺀 순자산으로 보므로, 부채가 있다면 실제로는 충족할 수 있어요.`,
++      );
++      fit = "확인 필요";
++    }
+   }
+ 
+   if (product.note) {
+diff --git a/src/types/loan.ts b/src/types/loan.ts
+index 1820ddb..ce72941 100644
+--- a/src/types/loan.ts
++++ b/src/types/loan.ts
+@@ -24,15 +24,19 @@ export interface LoanProduct {
+   /** "혼인 또는 3개월 이내 혼인예정" 요건이 있는 상품(신혼부부전용류)만 표시 */
+   requiresNewlywedOrEngaged?: boolean;
+   /** 부부(또는 단독세대주) 합산 연소득 상한. 만원 단위. 맞벌이 완화 기준이 없는
+-   *  상품은 이 값 하나만 쓴다(단독세대주/외벌이 기준과 같다고 가정). */
+-  incomeCapManwon: number;
++   *  상품은 이 값 하나만 쓴다(단독세대주/외벌이 기준과 같다고 가정). undefined면
++   *  이 상품엔 소득 상한 자체가 없다는 뜻(예: HF 일반전세자금보증) — 소득 축
++   *  검사를 아예 건너뛴다(항상 통과). */
++  incomeCapManwon?: number;
+   /** BaseProfile.dualIncome이 true일 때 incomeCapManwon 대신 쓰는 완화된 상한.
+    *  맞벌이 여부는 Profile1 화면에서 항상 입력받는 필드라 100% 확정 판단 가능하다. */
+   incomeCapManwonDualIncome?: number;
+   /** 2자녀 이상 가구 등 그 외 완화 조건이 있으면 참고용 문구로만 덧붙인다(판정에는 안 씀). */
+   incomeCapNote?: string;
+-  /** 순자산 상한. 만원 단위. */
+-  netAssetCapManwon: number;
++  /** 순자산 상한. 만원 단위. undefined면 이 상품엔 자산 상한 자체가 없거나(HF
++   *  일반전세자금보증) 조사 과정에서 공식 수치를 찾지 못한 것 — 어느 쪽이든
++   *  자산 축 검사를 건너뛴다(항상 통과, "확인 필요"로 낮추지 않는다). */
++  netAssetCapManwon?: number;
+   /** 대출한도 서술(지역별로 갈리는 경우가 많아 숫자 하나로 못 담는다). */
+   loanLimitNote: string;
+   /** 전세보증금 상한이 있는 상품만 설정(예: 청년전용 3억원 이하 주택). */
+-- 
+2.43.0
+
