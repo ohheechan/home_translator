@@ -1,0 +1,1092 @@
+From c7c7b1a96a10bffe7f4125fc70f81ff4399adad1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 1 Sep 2026 06:13:52 +0000
+Subject: [PATCH] =?UTF-8?q?=EA=B3=B5=EA=B3=A0=20=EB=91=98=EB=9F=AC?=
+ =?UTF-8?q?=EB=B3=B4=EA=B8=B0=20=EC=B6=94=EA=B0=80:=20SH=20=EC=9E=90?=
+ =?UTF-8?q?=EC=B2=B4=20=EA=B3=B5=EA=B3=A0=20=EB=AA=A9=EB=A1=9D/=EC=A0=84?=
+ =?UTF-8?q?=EB=AC=B8/PDF=20+=20=EC=B2=AD=EC=95=BD=ED=99=88=20=EC=A0=84?=
+ =?UTF-8?q?=EA=B5=AD=20=EA=B3=B5=EA=B3=A0=20=EB=AA=A9=EB=A1=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- src/server/sh-portal.ts: SH 인터넷청약시스템(i-sh.co.kr) 공고 게시판을
+  서버사이드에서 읽는다. 공개 API가 없어 list.do(세션 획득) → view.do(POST,
+  전문·첨부파일 메타) → innoFD.do(GET, 실제 PDF) 흐름을 세션 쿠키로 그대로
+  재현한다 — 실측으로 확인(제51차 장기전세 PDF 766KB 정상 수신).
+  청약홈/data.go.kr API 생태계 전체에 SH 장기전세주택이 아예 없다는
+  api-explore/FINDINGS.md의 기존 결론 때문에 이 경로가 필요했다.
+- src/server/applyhome.ts: 청약홈 분양정보 조회 서비스(getAPTLttotPblancDetail,
+  getPblPvtRentLttotPblancDetail)로 서울 지역 전국(LH/GH 등) 공고 목록을
+  가져온다. 이 API는 목록·접수기간만 주고 공고문 PDF는 안 줘서(기관마다
+  원문을 신문/자체 홈페이지 등 다른 곳에 올림 — 실측 확인됨), 원문은 청약홈
+  링크로 안내만 한다.
+- src/app/api/sh-notices, /api/applyhome-notices: 위 두 서버 헬퍼를 감싼
+  Next.js 라우트. PDF 라우트는 세션을 그대로 스트리밍해 클라이언트가 직접
+  다운로드/새창보기 할 수 있게 한다.
+- src/app/notices/page.tsx: 두 목록을 탭으로 보여주는 화면. SH 공고는 클릭하면
+  전문을 바로 읽을 수 있고, "모집공고" 성격 글이면 "이 공고문으로 분석 시작
+  하기" 버튼으로 기존 자격판정 위저드로 바로 넘어간다(PDF를 손으로 다시
+  받아 업로드할 필요 없음).
+- src/parser/analyze-pdf.ts: Upload.tsx의 PDF 분석 파이프라인(추출→파싱→분류)
+  을 공유 함수로 뽑아 Upload 화면과 공고 둘러보기의 "분석 시작하기"가 같은
+  로직을 쓰게 했다. Wizard.tsx는 마운트 시 sessionStorage의 pending PDF를
+  감지해 자동으로 이 파이프라인을 실행한다.
+---
+ src/app/api/applyhome-notices/route.ts    |  18 ++
+ src/app/api/sh-notices/[seq]/pdf/route.ts |  27 ++
+ src/app/api/sh-notices/[seq]/route.ts     |  20 ++
+ src/app/api/sh-notices/route.ts           |  20 ++
+ src/app/notices/page.tsx                  | 307 ++++++++++++++++++++++
+ src/app/wizard/Wizard.tsx                 |  25 +-
+ src/app/wizard/screens/Home.tsx           |   3 +
+ src/app/wizard/screens/Upload.tsx         |  80 +-----
+ src/parser/analyze-pdf.ts                 |  84 ++++++
+ src/server/applyhome.ts                   | 117 +++++++++
+ src/server/sh-portal.ts                   | 229 ++++++++++++++++
+ 11 files changed, 853 insertions(+), 77 deletions(-)
+ create mode 100644 src/app/api/applyhome-notices/route.ts
+ create mode 100644 src/app/api/sh-notices/[seq]/pdf/route.ts
+ create mode 100644 src/app/api/sh-notices/[seq]/route.ts
+ create mode 100644 src/app/api/sh-notices/route.ts
+ create mode 100644 src/app/notices/page.tsx
+ create mode 100644 src/parser/analyze-pdf.ts
+ create mode 100644 src/server/applyhome.ts
+ create mode 100644 src/server/sh-portal.ts
+
+diff --git a/src/app/api/applyhome-notices/route.ts b/src/app/api/applyhome-notices/route.ts
+new file mode 100644
+index 0000000..5c13c37
+--- /dev/null
++++ b/src/app/api/applyhome-notices/route.ts
+@@ -0,0 +1,18 @@
++import { NextRequest, NextResponse } from "next/server";
++import { fetchApplyhomeNotices } from "../../../server/applyhome";
++
++export const runtime = "nodejs";
++
++export async function GET(req: NextRequest) {
++  const { searchParams } = new URL(req.url);
++  const region = searchParams.get("region") ?? "서울";
++  try {
++    const items = await fetchApplyhomeNotices({ regionKeyword: region });
++    return NextResponse.json({ items });
++  } catch (e) {
++    return NextResponse.json(
++      { error: e instanceof Error ? e.message : "청약홈 공고 목록을 가져오지 못했어요." },
++      { status: 502 },
++    );
++  }
++}
+diff --git a/src/app/api/sh-notices/[seq]/pdf/route.ts b/src/app/api/sh-notices/[seq]/pdf/route.ts
+new file mode 100644
+index 0000000..83ea3d9
+--- /dev/null
++++ b/src/app/api/sh-notices/[seq]/pdf/route.ts
+@@ -0,0 +1,27 @@
++import { NextResponse } from "next/server";
++import { fetchShNoticePdf } from "../../../../../server/sh-portal";
++
++export const runtime = "nodejs";
++export const maxDuration = 30;
++
++export async function GET(_req: Request, { params }: { params: Promise<{ seq: string }> }) {
++  const { seq } = await params;
++  if (!/^\d+$/.test(seq)) {
++    return NextResponse.json({ error: "잘못된 공고 번호예요." }, { status: 400 });
++  }
++  try {
++    const { bytes, fileName, contentType } = await fetchShNoticePdf(seq);
++    return new NextResponse(bytes, {
++      headers: {
++        "Content-Type": contentType,
++        "Content-Disposition": `inline; filename="${encodeURIComponent(fileName)}"`,
++        "Cache-Control": "private, max-age=300",
++      },
++    });
++  } catch (e) {
++    return NextResponse.json(
++      { error: e instanceof Error ? e.message : "PDF를 가져오지 못했어요." },
++      { status: 502 },
++    );
++  }
++}
+diff --git a/src/app/api/sh-notices/[seq]/route.ts b/src/app/api/sh-notices/[seq]/route.ts
+new file mode 100644
+index 0000000..54b4c50
+--- /dev/null
++++ b/src/app/api/sh-notices/[seq]/route.ts
+@@ -0,0 +1,20 @@
++import { NextResponse } from "next/server";
++import { fetchShNoticeDetail } from "../../../../server/sh-portal";
++
++export const runtime = "nodejs";
++
++export async function GET(_req: Request, { params }: { params: Promise<{ seq: string }> }) {
++  const { seq } = await params;
++  if (!/^\d+$/.test(seq)) {
++    return NextResponse.json({ error: "잘못된 공고 번호예요." }, { status: 400 });
++  }
++  try {
++    const detail = await fetchShNoticeDetail(seq);
++    return NextResponse.json(detail);
++  } catch (e) {
++    return NextResponse.json(
++      { error: e instanceof Error ? e.message : "공고 상세를 가져오지 못했어요." },
++      { status: 502 },
++    );
++  }
++}
+diff --git a/src/app/api/sh-notices/route.ts b/src/app/api/sh-notices/route.ts
+new file mode 100644
+index 0000000..04e288a
+--- /dev/null
++++ b/src/app/api/sh-notices/route.ts
+@@ -0,0 +1,20 @@
++import { NextRequest, NextResponse } from "next/server";
++import { fetchShNoticeList } from "../../../server/sh-portal";
++
++export const runtime = "nodejs";
++
++export async function GET(req: NextRequest) {
++  const { searchParams } = new URL(req.url);
++  const page = Number(searchParams.get("page") ?? "1") || 1;
++  const q = searchParams.get("q") ?? undefined;
++
++  try {
++    const result = await fetchShNoticeList({ page, srchWord: q });
++    return NextResponse.json(result);
++  } catch (e) {
++    return NextResponse.json(
++      { error: e instanceof Error ? e.message : "SH 공고 목록을 가져오지 못했어요." },
++      { status: 502 },
++    );
++  }
++}
+diff --git a/src/app/notices/page.tsx b/src/app/notices/page.tsx
+new file mode 100644
+index 0000000..4e7df2f
+--- /dev/null
++++ b/src/app/notices/page.tsx
+@@ -0,0 +1,307 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useRouter } from "next/navigation";
++import type { NoticeListItem } from "../../server/applyhome";
++import type { ShNoticeDetail, ShNoticeListItem } from "../../server/sh-portal";
++import { fileToBase64 } from "../../parser/analyze-pdf";
++
++type Tab = "sh" | "applyhome";
++
++// 실제로 청약 신청을 받는 "모집공고" 성격 글만 분석 대상으로 제안한다 — 발표문/안내문/
++// 설문조사 같은 글까지 "분석하기" 버튼을 보여주면 당연히 파서가 이해 못 해 Tier B/C로
++// 떨어지고, 그건 버그가 아니라 애초에 그런 문서가 아니기 때문이라 혼란만 준다.
++function looksLikeApplicationNotice(title: string): boolean {
++  return /모집\s*공고/.test(title);
++}
++
++export default function NoticesPage() {
++  const router = useRouter();
++  const [tab, setTab] = useState<Tab>("sh");
++
++  const [shQuery, setShQuery] = useState("장기전세");
++  const [shItems, setShItems] = useState<ShNoticeListItem[] | null>(null);
++  const [shPage, setShPage] = useState(1);
++  const [shLoading, setShLoading] = useState(false);
++  const [shError, setShError] = useState<string | null>(null);
++
++  const [selectedSeq, setSelectedSeq] = useState<string | null>(null);
++  const [detail, setDetail] = useState<ShNoticeDetail | null>(null);
++  const [detailLoading, setDetailLoading] = useState(false);
++  const [detailError, setDetailError] = useState<string | null>(null);
++  const [importing, setImporting] = useState(false);
++  const [importError, setImportError] = useState<string | null>(null);
++
++  const [ahItems, setAhItems] = useState<NoticeListItem[] | null>(null);
++  const [ahLoading, setAhLoading] = useState(false);
++  const [ahError, setAhError] = useState<string | null>(null);
++
++  useEffect(() => {
++    if (tab !== "sh") return;
++    setShLoading(true);
++    setShError(null);
++    const params = new URLSearchParams({ page: String(shPage) });
++    if (shQuery.trim()) params.set("q", shQuery.trim());
++    fetch(`/api/sh-notices?${params.toString()}`)
++      .then((r) => r.json())
++      .then((json) => {
++        if (json.error) throw new Error(json.error);
++        setShItems(json.items);
++      })
++      .catch((e) => setShError(e instanceof Error ? e.message : "목록을 가져오지 못했어요."))
++      .finally(() => setShLoading(false));
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [tab, shPage]);
++
++  useEffect(() => {
++    if (tab !== "applyhome" || ahItems !== null) return;
++    setAhLoading(true);
++    setAhError(null);
++    fetch("/api/applyhome-notices?region=서울")
++      .then((r) => r.json())
++      .then((json) => {
++        if (json.error) throw new Error(json.error);
++        setAhItems(json.items);
++      })
++      .catch((e) => setAhError(e instanceof Error ? e.message : "목록을 가져오지 못했어요."))
++      .finally(() => setAhLoading(false));
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [tab]);
++
++  function runShSearch() {
++    setShPage(1);
++    setShItems(null);
++    // useEffect가 shPage 변화에 반응하지 않을 수 있으니(이미 1인 경우) 직접 재요청
++    setShLoading(true);
++    setShError(null);
++    const params = new URLSearchParams({ page: "1" });
++    if (shQuery.trim()) params.set("q", shQuery.trim());
++    fetch(`/api/sh-notices?${params.toString()}`)
++      .then((r) => r.json())
++      .then((json) => {
++        if (json.error) throw new Error(json.error);
++        setShItems(json.items);
++      })
++      .catch((e) => setShError(e instanceof Error ? e.message : "목록을 가져오지 못했어요."))
++      .finally(() => setShLoading(false));
++  }
++
++  function openDetail(seq: string) {
++    setSelectedSeq(seq);
++    setDetail(null);
++    setDetailError(null);
++    setImportError(null);
++    setDetailLoading(true);
++    fetch(`/api/sh-notices/${seq}`)
++      .then((r) => r.json())
++      .then((json) => {
++        if (json.error) throw new Error(json.error);
++        setDetail(json);
++      })
++      .catch((e) => setDetailError(e instanceof Error ? e.message : "상세를 가져오지 못했어요."))
++      .finally(() => setDetailLoading(false));
++  }
++
++  async function importAndAnalyze(seq: string) {
++    setImporting(true);
++    setImportError(null);
++    try {
++      const res = await fetch(`/api/sh-notices/${seq}/pdf`);
++      if (!res.ok) {
++        const json = await res.json().catch(() => null);
++        throw new Error(json?.error ?? "PDF를 가져오지 못했어요.");
++      }
++      const blob = await res.blob();
++      const base64 = await fileToBase64(blob);
++      sessionStorage.setItem("importPdfBase64", base64);
++      router.push("/");
++    } catch (e) {
++      setImportError(e instanceof Error ? e.message : "분석을 시작하지 못했어요.");
++      setImporting(false);
++    }
++  }
++
++  return (
++    <div>
++      <h1>진행 중인 공고 둘러보기</h1>
++      <p className="lead">
++        SH공사 자체 공고와 청약홈에 올라오는 전국 공고를 한눈에 볼 수 있어요. 청약홈은
++        공식 API가 공고문 원문(PDF)을 제공하지 않아 원문은 청약홈에서 직접 확인해야
++        해요 — 반면 SH 공고는 이 화면에서 바로 전문을 읽고, 장기전세주택 모집공고라면
++        곧바로 신청 자격 분석까지 이어갈 수 있어요.
++      </p>
++
++      <div className="chips" style={{ marginBottom: 16 }}>
++        <div className={`chip ${tab === "sh" ? "selected" : ""}`} onClick={() => setTab("sh")}>
++          SH 공고
++        </div>
++        <div className={`chip ${tab === "applyhome" ? "selected" : ""}`} onClick={() => setTab("applyhome")}>
++          청약홈 공고(서울, 전 기관)
++        </div>
++      </div>
++
++      {tab === "sh" && (
++        <>
++          <div className="card" style={{ marginBottom: 14 }}>
++            <label>제목 검색</label>
++            <div className="row">
++              <input
++                type="text"
++                value={shQuery}
++                onChange={(e) => setShQuery(e.target.value)}
++                onKeyDown={(e) => e.key === "Enter" && runShSearch()}
++                placeholder="예: 장기전세, 전세임대, 도시형생활주택 (비워두면 전체)"
++              />
++              <button className="btn btn-secondary" style={{ marginTop: 0 }} onClick={runShSearch}>
++                검색
++              </button>
++            </div>
++            <p className="hint">
++              기본값은 "장기전세"예요 — 지금 이 서비스가 정확하게 분석할 수 있는 상품이라
++              먼저 보여드려요. 검색어를 지우면 SH의 모든 공고및공지 게시글을 볼 수 있어요.
++            </p>
++          </div>
++
++          {shLoading && <div className="spinner-text">불러오는 중…</div>}
++          {shError && <div className="error-box">{shError}</div>}
++
++          {shItems && shItems.length === 0 && (
++            <div className="card">
++              <p className="hint">검색 결과가 없어요.</p>
++            </div>
++          )}
++
++          {shItems?.map((item) => (
++            <div key={item.seq} className="card" style={{ cursor: "pointer" }} onClick={() => openDetail(item.seq)}>
++              <div className="row" style={{ alignItems: "baseline", justifyContent: "space-between" }}>
++                <strong style={{ fontSize: 15 }}>{item.title}</strong>
++                {looksLikeApplicationNotice(item.title) && (
++                  <span className="badge badge-pass" style={{ flexShrink: 0, marginLeft: 8 }}>
++                    모집공고
++                  </span>
++                )}
++              </div>
++              <p className="hint" style={{ marginTop: 6 }}>
++                {item.dept} · {item.date} · 조회 {item.views}
++              </p>
++            </div>
++          ))}
++
++          {shItems && shItems.length > 0 && (
++            <div className="row" style={{ marginBottom: 14 }}>
++              <button
++                className="btn btn-ghost"
++                disabled={shPage <= 1}
++                onClick={() => setShPage((p) => Math.max(1, p - 1))}
++              >
++                이전 페이지
++              </button>
++              <button className="btn btn-ghost" onClick={() => setShPage((p) => p + 1)}>
++                다음 페이지
++              </button>
++            </div>
++          )}
++
++          {selectedSeq && (
++            <div className="card" style={{ borderColor: "var(--brand)" }}>
++              {detailLoading && <div className="spinner-text">공고 내용을 불러오는 중…</div>}
++              {detailError && <div className="error-box">{detailError}</div>}
++              {detail && (
++                <>
++                  <h2 style={{ marginBottom: 10 }}>{detail.title}</h2>
++                  <div
++                    style={{
++                      whiteSpace: "pre-wrap",
++                      fontSize: 13.5,
++                      lineHeight: 1.7,
++                      color: "#3a423e",
++                      maxHeight: 420,
++                      overflowY: "auto",
++                      border: "1px solid var(--line)",
++                      borderRadius: 10,
++                      padding: 14,
++                      marginBottom: 14,
++                    }}
++                  >
++                    {detail.bodyText || "본문 내용이 없어요."}
++                  </div>
++
++                  {detail.attachment ? (
++                    <>
++                      <p className="hint" style={{ marginBottom: 10 }}>
++                        첨부파일: {detail.attachment.fileName}
++                      </p>
++                      <a
++                        className="btn btn-secondary"
++                        href={`/api/sh-notices/${detail.seq}/pdf`}
++                        target="_blank"
++                        rel="noreferrer"
++                      >
++                        PDF 새 창에서 보기 / 다운로드
++                      </a>
++                      {looksLikeApplicationNotice(detail.title) && (
++                        <button
++                          className="btn btn-primary"
++                          disabled={importing}
++                          onClick={() => importAndAnalyze(detail.seq)}
++                        >
++                          {importing ? "PDF를 가져오는 중…" : "이 공고문으로 분석 시작하기"}
++                        </button>
++                      )}
++                      {importError && <div className="error-box" style={{ marginTop: 10 }}>{importError}</div>}
++                    </>
++                  ) : (
++                    <p className="hint">이 글에는 첨부파일이 없어요.</p>
++                  )}
++                </>
++              )}
++            </div>
++          )}
++        </>
++      )}
++
++      {tab === "applyhome" && (
++        <>
++          {ahLoading && <div className="spinner-text">불러오는 중…</div>}
++          {ahError && <div className="error-box">{ahError}</div>}
++          {ahItems && ahItems.length === 0 && (
++            <div className="card">
++              <p className="hint">현재 서울 지역으로 조회되는 공고가 없어요.</p>
++            </div>
++          )}
++          {ahItems?.map((item, i) => (
++            <div key={i} className="card">
++              <div className="row" style={{ alignItems: "baseline", justifyContent: "space-between" }}>
++                <strong style={{ fontSize: 15 }}>{item.houseName}</strong>
++                <span className="badge badge-warn" style={{ flexShrink: 0, marginLeft: 8 }}>
++                  {item.houseType}
++                </span>
++              </div>
++              <p className="hint" style={{ marginTop: 6 }}>
++                {item.agency || "사업주체 정보 없음"}
++              </p>
++              <p className="hint">{item.address}</p>
++              <p className="hint">
++                접수 {item.receiptStart || "미정"} ~ {item.receiptEnd || "미정"}
++              </p>
++              {item.detailUrl && (
++                <a className="btn btn-secondary" href={item.detailUrl} target="_blank" rel="noreferrer">
++                  청약홈에서 원문 보기
++                </a>
++              )}
++            </div>
++          ))}
++          <p className="hint" style={{ marginTop: 4 }}>
++            청약홈 API는 목록·접수기간 같은 정보만 주고 공고문 PDF 자체는 주지 않아요
++            (기관마다 원문을 신문·자체 홈페이지 등 서로 다른 곳에 올리기 때문). 자격
++            분석까지 하려면 원문 링크에서 PDF를 받아 홈 화면에서 업로드해주세요.
++          </p>
++        </>
++      )}
++
++      <a href="/" className="btn btn-ghost">
++        홈으로 돌아가기
++      </a>
++    </div>
++  );
++}
+diff --git a/src/app/wizard/Wizard.tsx b/src/app/wizard/Wizard.tsx
+index c064090..02eacfb 100644
+--- a/src/app/wizard/Wizard.tsx
++++ b/src/app/wizard/Wizard.tsx
+@@ -1,8 +1,9 @@
+ "use client";
+ 
+-import { useState } from "react";
++import { useEffect, useState } from "react";
+ import type { Step, WizardState } from "./types";
+ import { initialWizardState } from "./types";
++import { analyzePdfBase64 } from "../../parser/analyze-pdf";
+ import Home from "./screens/Home";
+ import Upload from "./screens/Upload";
+ import TierB from "./screens/TierB";
+@@ -31,6 +32,28 @@ export default function Wizard() {
+     setState(initialWizardState);
+   }
+ 
++  // "공고 둘러보기"에서 "이 공고문으로 분석 시작하기"를 누르면 여기로 돌아온다 —
++  // 사용자가 PDF를 다시 손으로 고를 필요 없이 자동으로 분석까지 이어간다.
++  useEffect(() => {
++    const pending = sessionStorage.getItem("importPdfBase64");
++    if (!pending) return;
++    sessionStorage.removeItem("importPdfBase64");
++    sessionStorage.removeItem("importPdfName");
++    setState((prev) => ({ ...prev, step: "upload", loading: true, errorMessage: null }));
++    analyzePdfBase64(pending)
++      .then(({ doc, nextStep }) => {
++        setState((prev) => ({ ...prev, loading: false, doc, step: nextStep }));
++      })
++      .catch((e: unknown) => {
++        setState((prev) => ({
++          ...prev,
++          loading: false,
++          errorMessage: e instanceof Error ? e.message : "공고문을 분석하지 못했어요.",
++        }));
++      });
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
+   const progressIndex = MAIN_FLOW_STEPS.indexOf(state.step);
+ 
+   return (
+diff --git a/src/app/wizard/screens/Home.tsx b/src/app/wizard/screens/Home.tsx
+index e89eb67..a6e34f0 100644
+--- a/src/app/wizard/screens/Home.tsx
++++ b/src/app/wizard/screens/Home.tsx
+@@ -17,6 +17,9 @@ export default function Home({ onStart }: { onStart: () => void }) {
+       <button className="btn btn-primary" onClick={onStart}>
+         시작하기
+       </button>
++      <a href="/notices" className="btn btn-secondary" style={{ textDecoration: "none" }}>
++        진행 중인 공고 둘러보기
++      </a>
+       <p className="disclaimer">
+         이 서비스는 참고용 예비 추정 도구입니다. 법적 효력이 없으며, 실제 자격은 서류심사
+         시 공적자료로 최종 확인됩니다.
+diff --git a/src/app/wizard/screens/Upload.tsx b/src/app/wizard/screens/Upload.tsx
+index 3b2ebc6..838a004 100644
+--- a/src/app/wizard/screens/Upload.tsx
++++ b/src/app/wizard/screens/Upload.tsx
+@@ -2,10 +2,7 @@
+ 
+ import { useState } from "react";
+ import type { Step, WizardState } from "../types";
+-import type { PdfExtraction } from "../../../parser/types";
+-import { parseShJangiJeonse } from "../../../parser/sh-jangi-jeonse";
+-import { classifyShJangiJeonseParse } from "../../../parser/classify";
+-import { extractGenericMetadata } from "../../../parser/generic-metadata";
++import { analyzePdfBase64, fileToBase64 } from "../../../parser/analyze-pdf";
+ 
+ interface Props {
+   state: WizardState;
+@@ -16,19 +13,6 @@ interface Props {
+ const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15MB — /api/extract의 4.5MB 요청 본문 한도를
+ // 넘는 파일은 어차피 서버에서 명확히 실패하지만, 그 전에 사용자에게 더 빨리 안내한다.
+ 
+-function fileToBase64(file: File): Promise<string> {
+-  return new Promise((resolve, reject) => {
+-    const reader = new FileReader();
+-    reader.onload = () => {
+-      const result = reader.result as string;
+-      const commaIdx = result.indexOf(",");
+-      resolve(result.slice(commaIdx + 1));
+-    };
+-    reader.onerror = () => reject(reader.error);
+-    reader.readAsDataURL(file);
+-  });
+-}
+-
+ export default function Upload({ state, update, goTo }: Props) {
+   const [file, setFile] = useState<File | null>(null);
+ 
+@@ -41,65 +25,9 @@ export default function Upload({ state, update, goTo }: Props) {
+     update({ loading: true, errorMessage: null });
+     try {
+       const pdfBase64 = await fileToBase64(file);
+-      const res = await fetch("/api/extract", {
+-        method: "POST",
+-        headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ pdfBase64 }),
+-      });
+-      const json = await res.json();
+-      if (!res.ok) {
+-        throw new Error(json.error ?? "PDF 추출에 실패했습니다.");
+-      }
+-      const pdf = json as PdfExtraction;
+-
+-      const { program, medianIncomeTable, warnings } = parseShJangiJeonse(pdf);
+-      const { tier, reasons } = classifyShJangiJeonseParse(program, warnings);
+-
+-      if (tier === "A") {
+-        update({
+-          loading: false,
+-          doc: {
+-            tier,
+-            program,
+-            medianIncomeTable: medianIncomeTable ?? null,
+-            parseWarnings: warnings,
+-            tierReasons: reasons,
+-            genericMetadata: null,
+-          },
+-        });
+-        goTo("area-select");
+-        return;
+-      }
+-
+-      if (tier === "B") {
+-        update({
+-          loading: false,
+-          doc: {
+-            tier,
+-            program,
+-            medianIncomeTable: medianIncomeTable ?? null,
+-            parseWarnings: warnings,
+-            tierReasons: reasons,
+-            genericMetadata: extractGenericMetadata(pdf),
+-          },
+-        });
+-        goTo("tier-b");
+-        return;
+-      }
+-
+-      // tier === "C"
+-      update({
+-        loading: false,
+-        doc: {
+-          tier,
+-          program: null,
+-          medianIncomeTable: null,
+-          parseWarnings: warnings,
+-          tierReasons: reasons,
+-          genericMetadata: extractGenericMetadata(pdf),
+-        },
+-      });
+-      goTo("tier-c");
++      const { doc, nextStep } = await analyzePdfBase64(pdfBase64);
++      update({ loading: false, doc });
++      goTo(nextStep);
+     } catch (e) {
+       update({ loading: false, errorMessage: e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다." });
+     }
+diff --git a/src/parser/analyze-pdf.ts b/src/parser/analyze-pdf.ts
+new file mode 100644
+index 0000000..c8f3f8f
+--- /dev/null
++++ b/src/parser/analyze-pdf.ts
+@@ -0,0 +1,84 @@
++/**
++ * Upload.tsx의 handleUpload와 "공고 둘러보기"에서 가져온 PDF를 분석하는 흐름이
++ * 완전히 같아서(base64 → /api/extract → parseShJangiJeonse → classify) 공유
++ * 함수로 뽑았다. 호출부(화면)는 결과를 어떻게 WizardState에 반영할지만 결정한다.
++ */
++import type { Step, WizardState } from "../app/wizard/types";
++import type { PdfExtraction } from "./types";
++import { parseShJangiJeonse } from "./sh-jangi-jeonse";
++import { classifyShJangiJeonseParse } from "./classify";
++import { extractGenericMetadata } from "./generic-metadata";
++
++export interface AnalyzePdfResult {
++  doc: WizardState["doc"];
++  nextStep: Step;
++}
++
++export async function analyzePdfBase64(pdfBase64: string): Promise<AnalyzePdfResult> {
++  const res = await fetch("/api/extract", {
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ pdfBase64 }),
++  });
++  const json = await res.json();
++  if (!res.ok) {
++    throw new Error(json.error ?? "PDF 추출에 실패했습니다.");
++  }
++  const pdf = json as PdfExtraction;
++
++  const { program, medianIncomeTable, warnings } = parseShJangiJeonse(pdf);
++  const { tier, reasons } = classifyShJangiJeonseParse(program, warnings);
++
++  if (tier === "A") {
++    return {
++      nextStep: "area-select",
++      doc: {
++        tier,
++        program,
++        medianIncomeTable: medianIncomeTable ?? null,
++        parseWarnings: warnings,
++        tierReasons: reasons,
++        genericMetadata: null,
++      },
++    };
++  }
++
++  if (tier === "B") {
++    return {
++      nextStep: "tier-b",
++      doc: {
++        tier,
++        program,
++        medianIncomeTable: medianIncomeTable ?? null,
++        parseWarnings: warnings,
++        tierReasons: reasons,
++        genericMetadata: extractGenericMetadata(pdf),
++      },
++    };
++  }
++
++  return {
++    nextStep: "tier-c",
++    doc: {
++      tier,
++      program: null,
++      medianIncomeTable: null,
++      parseWarnings: warnings,
++      tierReasons: reasons,
++      genericMetadata: extractGenericMetadata(pdf),
++    },
++  };
++}
++
++export function fileToBase64(file: File | Blob): Promise<string> {
++  return new Promise((resolve, reject) => {
++    const reader = new FileReader();
++    reader.onload = () => {
++      const result = reader.result as string;
++      const commaIdx = result.indexOf(",");
++      resolve(result.slice(commaIdx + 1));
++    };
++    reader.onerror = () => reject(reader.error);
++    reader.readAsDataURL(file);
++  });
++}
+diff --git a/src/server/applyhome.ts b/src/server/applyhome.ts
+new file mode 100644
+index 0000000..167f67d
+--- /dev/null
++++ b/src/server/applyhome.ts
+@@ -0,0 +1,117 @@
++/**
++ * 청약홈 분양정보 조회 서비스(data.go.kr, odcloud stage 37000) 클라이언트.
++ * api-explore/FINDINGS.md에서 실측 확인한 두 오퍼레이션만 쓴다:
++ *  - getAPTLttotPblancDetail (APT 분양/신혼희망타운 등)
++ *  - getPblPvtRentLttotPblancDetail (공공지원민간임대)
++ * 둘 다 "공고가 어디 있고 언제 접수하는지"까지만 주고, 소득·자산·배점 같은
++ * 자격판정 데이터는 안 준다 — 그래서 이 서비스는 "목록/원문 링크 안내"용으로만
++ * 쓴다(present.ts 배점 엔진과는 무관).
++ *
++ * DATA_GO_KR_SERVICE_KEY는 data.go.kr이 발급하는 그대로(이미 URL-encode된 값,
++ * %2F/%3D%3D 포함)를 환경변수에 넣어야 한다 — URLSearchParams로 다시 encode하면
++ * 이중 인코딩되어 401이 난다(FINDINGS.md에 기록된 실측 함정). 그래서 이 값만
++ * 쿼리스트링에 직접(re-encode 없이) 이어붙인다.
++ */
++
++const ODCLOUD_BASE = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1";
++
++export interface NoticeListItem {
++  source: "applyhome";
++  houseType: string; // HOUSE_SECD_NM
++  houseName: string;
++  agency: string;
++  address: string;
++  region: string;
++  receiptStart: string;
++  receiptEnd: string;
++  detailUrl: string;
++  houseManageNo: string;
++  pblancNo: string;
++}
++
++interface OdcloudResponse {
++  data: Record<string, unknown>[];
++}
++
++async function fetchOdcloud(path: string, extraParams: Record<string, string>, perPage: number): Promise<Record<string, unknown>[]> {
++  const serviceKey = process.env.DATA_GO_KR_SERVICE_KEY;
++  if (!serviceKey) {
++    throw new Error("서버에 DATA_GO_KR_SERVICE_KEY가 설정되어 있지 않아요.");
++  }
++  const qs = new URLSearchParams({ page: "1", perPage: String(perPage) });
++  for (const [k, v] of Object.entries(extraParams)) qs.set(k, v);
++  const url = `${ODCLOUD_BASE}/${path}?${qs.toString()}&serviceKey=${serviceKey}`;
++  const res = await fetch(url, { headers: { Accept: "application/json" } });
++  if (!res.ok) {
++    throw new Error(`청약홈 API 호출에 실패했어요 (HTTP ${res.status}).`);
++  }
++  const json = (await res.json()) as OdcloudResponse;
++  return json.data ?? [];
++}
++
++function str(row: Record<string, unknown>, key: string): string {
++  const v = row[key];
++  return v == null ? "" : String(v);
++}
++
++export async function fetchApplyhomeNotices(opts: { regionKeyword?: string } = {}): Promise<NoticeListItem[]> {
++  const region = opts.regionKeyword ?? "서울";
++
++  const [apt, rent] = await Promise.all([
++    fetchOdcloud("getAPTLttotPblancDetail", {}, 100).catch(() => []),
++    fetchOdcloud("getPblPvtRentLttotPblancDetail", {}, 100).catch(() => []),
++  ]);
++
++  const items: NoticeListItem[] = [];
++
++  for (const row of apt) {
++    const regionNm = str(row, "SUBSCRPT_AREA_CODE_NM");
++    const addr = str(row, "HSSPLY_ADRES");
++    // 공급지역명이 있으면 그걸로만 판단한다(광역 사업 설명문에 다른 지역명이 우연히
++    // 섞여있어 주소 부분일치만으로 거르면 오탐이 생긴다 — 예: 인천 공고인데 주소에
++    // "서울특별시 강서구"가 인접 사업지 설명으로 함께 적힌 경우). 지역명 필드가 아예
++    // 비어있을 때만 주소 부분일치로 대체한다.
++    const matchesRegion = regionNm ? regionNm.includes(region) : addr.includes(region);
++    if (!matchesRegion) continue;
++    items.push({
++      source: "applyhome",
++      houseType: str(row, "HOUSE_SECD_NM") || str(row, "HOUSE_DTL_SECD_NM"),
++      houseName: str(row, "HOUSE_NM"),
++      agency: str(row, "BSNS_MBY_NM"),
++      address: addr,
++      region: regionNm,
++      receiptStart: str(row, "RCEPT_BGNDE"),
++      receiptEnd: str(row, "RCEPT_ENDDE"),
++      detailUrl: str(row, "PBLANC_URL"),
++      houseManageNo: str(row, "HOUSE_MANAGE_NO"),
++      pblancNo: str(row, "PBLANC_NO"),
++    });
++  }
++
++  for (const row of rent) {
++    const regionNm = str(row, "SUBSCRPT_AREA_CODE_NM");
++    const addr = str(row, "HSSPLY_ADRES");
++    // 공급지역명이 있으면 그걸로만 판단한다(광역 사업 설명문에 다른 지역명이 우연히
++    // 섞여있어 주소 부분일치만으로 거르면 오탐이 생긴다 — 예: 인천 공고인데 주소에
++    // "서울특별시 강서구"가 인접 사업지 설명으로 함께 적힌 경우). 지역명 필드가 아예
++    // 비어있을 때만 주소 부분일치로 대체한다.
++    const matchesRegion = regionNm ? regionNm.includes(region) : addr.includes(region);
++    if (!matchesRegion) continue;
++    items.push({
++      source: "applyhome",
++      houseType: str(row, "HOUSE_SECD_NM") || "공공지원민간임대",
++      houseName: str(row, "HOUSE_NM"),
++      agency: str(row, "BSNS_MBY_NM"),
++      address: addr,
++      region: regionNm,
++      receiptStart: str(row, "SUBSCRPT_RCEPT_BGNDE"),
++      receiptEnd: str(row, "SUBSCRPT_RCEPT_ENDDE"),
++      detailUrl: str(row, "PBLANC_URL"),
++      houseManageNo: str(row, "HOUSE_MANAGE_NO"),
++      pblancNo: str(row, "PBLANC_NO"),
++    });
++  }
++
++  items.sort((a, b) => (a.receiptStart < b.receiptStart ? 1 : -1));
++  return items;
++}
+diff --git a/src/server/sh-portal.ts b/src/server/sh-portal.ts
+new file mode 100644
+index 0000000..6524624
+--- /dev/null
++++ b/src/server/sh-portal.ts
+@@ -0,0 +1,229 @@
++/**
++ * SH공사 자체 "인터넷청약시스템"(i-sh.co.kr) 공고 게시판을 서버사이드에서 읽어오는
++ * 헬퍼. 왜 필요한가 — api-explore/FINDINGS.md에서 실측 확인했듯, 청약홈/data.go.kr
++ * API 생태계 전체에 SH 장기전세주택 같은 SH 자체 상품이 아예 없다(청약홈이 다루는
++ * 상품군: APT 분양/오피스텔/공공지원민간임대/무순위·잔여세대/임의공급 — SH 장기전세는
++ * 이 중 어디에도 속하지 않고 SH 자체 시스템에서만 공고·접수됨). 그래서 "SH 공고
++ * 목록"은 청약홈 API로 대체할 수 없고, SH 사이트 자체를 읽어야 한다.
++ *
++ * 이 게시판(청약정보>공고및공지>주택분양, brd_id=GS0401)은 공개 API가 없다 —
++ * 목록/상세 모두 서버사이드 렌더링이 아니라 폼 POST + 세션 쿠키 기반이라, 이
++ * 모듈이 매 요청마다 쿠키 잭(list.do → view.do → innoFD.do 순서)을 직접 흉내낸다.
++ * robots.txt에 이 경로를 막는 규칙이 없고, 공개 게시판(로그인 없이 누구나 보는
++ * 공고문)만 다룬다 — 청약 신청 자체(로그인·본인인증 필요)는 건드리지 않는다.
++ *
++ * 실측 근거(2026-09-01): 제51차 장기전세주택 입주자모집공고(seq=309467)로
++ * list.do → view.do(POST) → innoFD.do(GET) 순서를 그대로 재현해 실제 PDF(766KB,
++ * "제51차 장기전세 입주자 모집공고.pdf")를 받아오는 것까지 확인했다.
++ */
++
++const BASE = "https://www.i-sh.co.kr/app/lay2/program/S48T1581C1617/www/brd/m_244";
++const BRD_ID = "GS0401";
++const UA =
++  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
++
++export interface ShNoticeListItem {
++  seq: string;
++  title: string;
++  dept: string;
++  date: string;
++  views: string;
++}
++
++export interface ShNoticeListResult {
++  items: ShNoticeListItem[];
++  page: number;
++}
++
++export interface ShNoticeAttachment {
++  fileName: string;
++  fileSeq: string;
++}
++
++export interface ShNoticeDetail {
++  seq: string;
++  title: string;
++  bodyText: string;
++  attachment: ShNoticeAttachment | null;
++}
++
++/** Set-Cookie 응답 헤더(여러 개일 수 있음)에서 "name=value" 쌍만 뽑아 Cookie 헤더용 문자열로 합친다. */
++function collectCookies(res: Response, jar: Map<string, string>) {
++  const setCookie =
++    typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
++  const raw = setCookie.length > 0 ? setCookie : (res.headers.get("set-cookie")?.split(/,(?=[^;]+=[^;]+;)/) ?? []);
++  for (const c of raw) {
++    const pair = c.split(";")[0];
++    const eq = pair.indexOf("=");
++    if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
++  }
++}
++
++function cookieHeader(jar: Map<string, string>): string {
++  return Array.from(jar.entries())
++    .map(([k, v]) => `${k}=${v}`)
++    .join("; ");
++}
++
++/** list.do를 한 번 GET해서 세션 쿠키(JEUSSID 등)를 얻는다. 목록 자체도 이 응답에서 파싱한다. */
++async function primeSession(jar: Map<string, string>): Promise<string> {
++  const res = await fetch(`${BASE}/list.do`, {
++    headers: { "User-Agent": UA },
++  });
++  collectCookies(res, jar);
++  return res.text();
++}
++
++function stripTags(html: string): string {
++  return html
++    .replace(/<br\s*\/?>/gi, "\n")
++    .replace(/<\/p>/gi, "\n")
++    .replace(/<[^>]+>/g, "")
++    .replace(/&nbsp;/g, " ")
++    .replace(/&amp;/g, "&")
++    .replace(/&lt;/g, "<")
++    .replace(/&gt;/g, ">")
++    .replace(/&quot;/g, '"')
++    .replace(/&#39;/g, "'")
++    .replace(/[ \t]+\n/g, "\n")
++    .replace(/\n{3,}/g, "\n\n")
++    .trim();
++}
++
++/** 제목 검색으로 필터링된 공고 목록. srchWord가 없으면 전체 목록(최신순). */
++export async function fetchShNoticeList(opts: { page?: number; srchWord?: string } = {}): Promise<ShNoticeListResult> {
++  const page = opts.page ?? 1;
++  const jar = new Map<string, string>();
++  const body = new URLSearchParams({ page: String(page) });
++  if (opts.srchWord) {
++    body.set("srchTp", "0"); // 0: 제목 검색
++    body.set("srchWord", opts.srchWord);
++  }
++  const res = await fetch(`${BASE}/list.do`, {
++    method: "POST",
++    headers: {
++      "User-Agent": UA,
++      "Content-Type": "application/x-www-form-urlencoded",
++    },
++    body: body.toString(),
++  });
++  collectCookies(res, jar);
++  const html = await res.text();
++
++  const items: ShNoticeListItem[] = [];
++  const rowRe = /<tr>([\s\S]*?)<\/tr>/g;
++  let m: RegExpExecArray | null;
++  while ((m = rowRe.exec(html))) {
++    const row = m[1];
++    const seqMatch = row.match(/getDetailView\('(\d+)'\)/);
++    if (!seqMatch) continue;
++    const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)).map((c) => stripTags(c[1]).trim());
++    // 셀 구성: [번호, 제목(+NEW뱃지 텍스트 섞임), 부서명, 날짜, 조회수]
++    if (cells.length < 5) continue;
++    const title = cells[1].replace(/^NEW\s*/, "").trim();
++    items.push({
++      seq: seqMatch[1],
++      title,
++      dept: cells[2],
++      date: cells[3],
++      views: cells[4],
++    });
++  }
++
++  return { items, page };
++}
++
++/** 공고 상세: 전문 텍스트 + 첨부파일 메타(있으면). PDF 다운로드에 필요한 file_seq도 함께 얻는다. */
++export async function fetchShNoticeDetail(seq: string): Promise<ShNoticeDetail> {
++  const jar = new Map<string, string>();
++  await primeSession(jar);
++
++  const res = await fetch(`${BASE}/view.do`, {
++    method: "POST",
++    headers: {
++      "User-Agent": UA,
++      "Content-Type": "application/x-www-form-urlencoded",
++      Cookie: cookieHeader(jar),
++      Referer: `${BASE}/list.do`,
++    },
++    body: new URLSearchParams({ seq }).toString(),
++  });
++  const html = await res.text();
++
++  const titleMatch = html.match(/<caption>([^<]+)<\/caption>/);
++  const bodyMatch = html.match(/<td colspan="2" class="cont">([\s\S]*?)<\/td>\s*<\/tr>/);
++  // 첨부파일 링크 위에 아이콘 예시가 HTML 주석으로 남아있어("<!-- ... <a class=btnAttach>.pdf</a> ... -->")
++  // onclick="existFile(...)"가 있는 진짜 링크만 골라야 한다(주석은 이 속성이 없음).
++  const attachNameMatch = html.match(/class="btnAttach[^"]*"[^>]*onclick="existFile[^>]*>\s*([\s\S]*?)\s*<\/a>/);
++  const fileSeqMatch = html.match(/file_seq=(\d+)/);
++
++  return {
++    seq,
++    title: titleMatch ? titleMatch[1].trim() : `공고 ${seq}`,
++    bodyText: bodyMatch ? stripTags(bodyMatch[1]) : "",
++    attachment:
++      attachNameMatch && fileSeqMatch
++        ? { fileName: stripTags(attachNameMatch[1]).trim(), fileSeq: fileSeqMatch[1] }
++        : null,
++  };
++}
++
++export interface ShNoticePdf {
++  bytes: ArrayBuffer;
++  fileName: string;
++  contentType: string;
++}
++
++/**
++ * list.do(세션 획득) → view.do(POST, 첨부파일 존재 확인 겸 세션 유지) → innoFD.do(GET, 실제 파일)
++ * 순서를 그대로 재현한다. 셋 중 하나라도 건너뛰면 innoFD.do가 401을 준다(실측 확인됨).
++ */
++export async function fetchShNoticePdf(seq: string): Promise<ShNoticePdf> {
++  const jar = new Map<string, string>();
++  await primeSession(jar);
++
++  const viewRes = await fetch(`${BASE}/view.do`, {
++    method: "POST",
++    headers: {
++      "User-Agent": UA,
++      "Content-Type": "application/x-www-form-urlencoded",
++      Cookie: cookieHeader(jar),
++      Referer: `${BASE}/list.do`,
++    },
++    body: new URLSearchParams({ seq }).toString(),
++  });
++  collectCookies(viewRes, jar);
++  const viewHtml = await viewRes.text();
++
++  const fileSeqMatch = viewHtml.match(/file_seq=(\d+)/);
++  if (!fileSeqMatch) {
++    throw new Error("이 공고에는 첨부파일(PDF)이 없어요.");
++  }
++  const fileSeq = fileSeqMatch[1];
++
++  const dlRes = await fetch(
++    `https://www.i-sh.co.kr/app/com/file/innoFD.do?brdId=${BRD_ID}&seq=${seq}&fileTp=A&fileSeq=${fileSeq}`,
++    {
++      headers: {
++        "User-Agent": UA,
++        Cookie: cookieHeader(jar),
++        Referer: `${BASE}/view.do`,
++      },
++    },
++  );
++  if (!dlRes.ok) {
++    throw new Error(`SH 사이트에서 파일을 받아오지 못했어요 (HTTP ${dlRes.status}).`);
++  }
++  const disposition = dlRes.headers.get("content-disposition") ?? "";
++  const nameMatch = disposition.match(/filename="?([^";]+)"?/);
++  let fileName = "공고문.pdf";
++  if (nameMatch) {
++    try {
++      fileName = decodeURIComponent(nameMatch[1]);
++    } catch {
++      fileName = nameMatch[1];
++    }
++  }
++  const bytes = await dlRes.arrayBuffer();
++  return { bytes, fileName, contentType: dlRes.headers.get("content-type") ?? "application/pdf" };
++}
+-- 
+2.43.0
+
