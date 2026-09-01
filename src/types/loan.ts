@@ -24,15 +24,19 @@ export interface LoanProduct {
   /** "혼인 또는 3개월 이내 혼인예정" 요건이 있는 상품(신혼부부전용류)만 표시 */
   requiresNewlywedOrEngaged?: boolean;
   /** 부부(또는 단독세대주) 합산 연소득 상한. 만원 단위. 맞벌이 완화 기준이 없는
-   *  상품은 이 값 하나만 쓴다(단독세대주/외벌이 기준과 같다고 가정). */
-  incomeCapManwon: number;
+   *  상품은 이 값 하나만 쓴다(단독세대주/외벌이 기준과 같다고 가정). undefined면
+   *  이 상품엔 소득 상한 자체가 없다는 뜻(예: HF 일반전세자금보증) — 소득 축
+   *  검사를 아예 건너뛴다(항상 통과). */
+  incomeCapManwon?: number;
   /** BaseProfile.dualIncome이 true일 때 incomeCapManwon 대신 쓰는 완화된 상한.
    *  맞벌이 여부는 Profile1 화면에서 항상 입력받는 필드라 100% 확정 판단 가능하다. */
   incomeCapManwonDualIncome?: number;
   /** 2자녀 이상 가구 등 그 외 완화 조건이 있으면 참고용 문구로만 덧붙인다(판정에는 안 씀). */
   incomeCapNote?: string;
-  /** 순자산 상한. 만원 단위. */
-  netAssetCapManwon: number;
+  /** 순자산 상한. 만원 단위. undefined면 이 상품엔 자산 상한 자체가 없거나(HF
+   *  일반전세자금보증) 조사 과정에서 공식 수치를 찾지 못한 것 — 어느 쪽이든
+   *  자산 축 검사를 건너뛴다(항상 통과, "확인 필요"로 낮추지 않는다). */
+  netAssetCapManwon?: number;
   /** 대출한도 서술(지역별로 갈리는 경우가 많아 숫자 하나로 못 담는다). */
   loanLimitNote: string;
   /** 전세보증금 상한이 있는 상품만 설정(예: 청년전용 3억원 이하 주택). */

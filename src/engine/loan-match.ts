@@ -84,26 +84,32 @@ function evaluateProduct(
 
   // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준. 맞벌이 완화
   //     상한이 있는 상품은 dualIncome(Profile1에서 항상 입력받는 확정 필드)에
-  //     따라 적용할 상한 자체를 바꾼다. ──
+  //     따라 적용할 상한 자체를 바꾼다. incomeCapManwon 자체가 없는 상품(예: HF
+  //     일반전세자금보증)은 소득 상한이 없다는 뜻이라 이 축을 건너뛴다. ──
   const applicableIncomeCapManwon =
     base.dualIncome && product.incomeCapManwonDualIncome !== undefined
       ? product.incomeCapManwonDualIncome
       : product.incomeCapManwon;
-  const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
-  if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
-    reasons.push(
-      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
-    );
-    fit = "확인 필요";
+  if (applicableIncomeCapManwon !== undefined) {
+    const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
+    if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
+      reasons.push(
+        `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
+      );
+      fit = "확인 필요";
+    }
   }
 
-  // ── 자산: 총자산(상한선 역할) vs 상품의 순자산 기준 ──
-  const totalAssetManwon = base.totalAssetWon / 10_000;
-  if (totalAssetManwon > product.netAssetCapManwon) {
-    reasons.push(
-      `총자산 ${fmtManwon(totalAssetManwon)}이 순자산 기준 ${fmtManwon(product.netAssetCapManwon)}을 넘어요 — 이 상품 기준은 총자산에서 부채를 뺀 순자산으로 보므로, 부채가 있다면 실제로는 충족할 수 있어요.`,
-    );
-    fit = "확인 필요";
+  // ── 자산: 총자산(상한선 역할) vs 상품의 순자산 기준. netAssetCapManwon이
+  //     없는 상품은 자산 상한이 없거나(HF) 공식 수치를 못 찾은 것이라 건너뛴다 ──
+  if (product.netAssetCapManwon !== undefined) {
+    const totalAssetManwon = base.totalAssetWon / 10_000;
+    if (totalAssetManwon > product.netAssetCapManwon) {
+      reasons.push(
+        `총자산 ${fmtManwon(totalAssetManwon)}이 순자산 기준 ${fmtManwon(product.netAssetCapManwon)}을 넘어요 — 이 상품 기준은 총자산에서 부채를 뺀 순자산으로 보므로, 부채가 있다면 실제로는 충족할 수 있어요.`,
+      );
+      fit = "확인 필요";
+    }
   }
 
   if (product.note) {
