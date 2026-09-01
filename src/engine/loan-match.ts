@@ -59,11 +59,40 @@ function evaluateProduct(
     }
   }
 
-  // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준 ──
+  // ── 신생아특례: 출산 시점 정보가 없으면 확정 배제도 확정 충족도 못 한다. 단,
+  //     배점 세부정보에서 "2023.3.28. 이후 출생 자녀 0명"이라고 입력했다면 — 이
+  //     상품의 기준일(2023.1.1.)보다도 늦은 기준으로도 0명이라는 뜻이라 신생아특례
+  //     기준(2023.1.1. 이후)도 당연히 0명 → 확정 배제해도 안전하다. ──
+  if (product.id === "beotimok-newborn") {
+    if (detail?.newbornChildAdjustment?.childrenBornAfter20230328 === 0) {
+      return null;
+    }
+    if (!detail?.newbornChildAdjustment || detail.newbornChildAdjustment.childrenBornAfter20230328 > 0) {
+      reasons.push(
+        "대출접수일 기준 2년 이내 출산·입양했는지는 입력하신 정보만으로 확인할 수 없어요(배점 세부정보의 출생자녀 수와는 기준 시점이 달라요).",
+      );
+      fit = "확인 필요";
+    }
+  }
+
+  // ── 중기청: 중소·중견기업 재직 여부는 이 서비스가 아예 입력받지 않는 항목이라
+  //     항상 확인 필요로 남긴다 — "가능성 높음"까지는 절대 못 준다. ──
+  if (product.id === "jungsokiup-youth") {
+    reasons.push("중소·중견기업 재직 여부(또는 청년창업 여부)는 이 서비스에서 입력받지 않아 확인할 수 없어요.");
+    fit = "확인 필요";
+  }
+
+  // ── 소득: 가구 전체 합산(상한선 역할) vs 상품의 부부합산 기준. 맞벌이 완화
+  //     상한이 있는 상품은 dualIncome(Profile1에서 항상 입력받는 확정 필드)에
+  //     따라 적용할 상한 자체를 바꾼다. ──
+  const applicableIncomeCapManwon =
+    base.dualIncome && product.incomeCapManwonDualIncome !== undefined
+      ? product.incomeCapManwonDualIncome
+      : product.incomeCapManwon;
   const householdAnnualIncomeManwon = (base.householdMonthlyIncomeWon / 10_000) * 12;
-  if (householdAnnualIncomeManwon > product.incomeCapManwon) {
+  if (householdAnnualIncomeManwon > applicableIncomeCapManwon) {
     reasons.push(
-      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(product.incomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
+      `가구 전체 합산 연소득 약 ${fmtManwon(householdAnnualIncomeManwon)}이 상품 기준(부부합산 ${fmtManwon(applicableIncomeCapManwon)})을 넘어요 — 이 상품 기준은 가구원 전체가 아니라 부부(또는 단독세대주) 소득만 보므로, 가구원 중 다른 소득자가 있다면 실제로는 충족할 수 있어요.`,
     );
     fit = "확인 필요";
   }
@@ -77,8 +106,12 @@ function evaluateProduct(
     fit = "확인 필요";
   }
 
+  if (product.note) {
+    reasons.push(product.note);
+  }
+
   if (fit === "가능성 높음") {
-    reasons.push("입력하신 정보 기준으로는 기본 요건에 부합해 보여요.");
+    reasons.unshift("입력하신 정보 기준으로는 기본 요건에 부합해 보여요.");
   }
 
   return { product, fit, reasons };
