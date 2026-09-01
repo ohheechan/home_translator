@@ -40,6 +40,9 @@ export default function NoticesPage() {
     if (tab !== "sh") return;
     setShLoading(true);
     setShError(null);
+    // 페이지가 바뀌면 목록이 통째로 바뀌니, 이전 페이지에서 펼쳐둔 상세 패널은 닫는다.
+    setSelectedSeq(null);
+    setDetail(null);
     const params = new URLSearchParams({ page: String(shPage) });
     if (shQuery.trim()) params.set("q", shQuery.trim());
     fetch(`/api/sh-notices?${params.toString()}`)
@@ -71,6 +74,8 @@ export default function NoticesPage() {
   function runShSearch() {
     setShPage(1);
     setShItems(null);
+    setSelectedSeq(null);
+    setDetail(null);
     // useEffect가 shPage 변화에 반응하지 않을 수 있으니(이미 1인 경우) 직접 재요청
     setShLoading(true);
     setShError(null);
@@ -100,6 +105,15 @@ export default function NoticesPage() {
       })
       .catch((e) => setDetailError(e instanceof Error ? e.message : "상세를 가져오지 못했어요."))
       .finally(() => setDetailLoading(false));
+  }
+
+  // 같은 공고를 다시 누르면 접히고, 다른 공고를 누르면 그 공고로 펼쳐진다(아코디언).
+  function toggleDetail(seq: string) {
+    if (selectedSeq === seq) {
+      setSelectedSeq(null);
+      return;
+    }
+    openDetail(seq);
   }
 
   async function importAndAnalyze(seq: string) {
@@ -171,21 +185,92 @@ export default function NoticesPage() {
             </div>
           )}
 
-          {shItems?.map((item) => (
-            <div key={item.seq} className="card" style={{ cursor: "pointer" }} onClick={() => openDetail(item.seq)}>
-              <div className="row" style={{ alignItems: "baseline", justifyContent: "space-between" }}>
-                <strong style={{ fontSize: 15 }}>{item.title}</strong>
-                {looksLikeApplicationNotice(item.title) && (
-                  <span className="badge badge-pass" style={{ flexShrink: 0, marginLeft: 8 }}>
-                    모집공고
-                  </span>
-                )}
+          {shItems?.map((item) => {
+            const isOpen = selectedSeq === item.seq;
+            return (
+              <div key={item.seq} className="notice-item">
+                <div
+                  className={`card notice-card ${isOpen ? "open" : ""}`}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => toggleDetail(item.seq)}
+                >
+                  <div className="row" style={{ alignItems: "baseline", justifyContent: "space-between" }}>
+                    <strong style={{ fontSize: 15 }}>{item.title}</strong>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginLeft: 8 }}>
+                      {looksLikeApplicationNotice(item.title) && <span className="badge badge-pass">모집공고</span>}
+                      <span className={`notice-chevron ${isOpen ? "open" : ""}`} aria-hidden="true">
+                        ▾
+                      </span>
+                    </div>
+                  </div>
+                  <p className="hint" style={{ marginTop: 6 }}>
+                    {item.dept} · {item.date} · 조회 {item.views}
+                  </p>
+                </div>
+
+                <div className={`notice-detail-collapse ${isOpen ? "open" : ""}`}>
+                  <div className="notice-detail-inner">
+                    <div className="card notice-detail-card">
+                      {detailLoading && <div className="spinner-text">공고 내용을 불러오는 중…</div>}
+                      {detailError && <div className="error-box">{detailError}</div>}
+                      {detail && detail.seq === item.seq && (
+                        <>
+                          <div
+                            style={{
+                              whiteSpace: "pre-wrap",
+                              fontSize: 13.5,
+                              lineHeight: 1.7,
+                              color: "#3a423e",
+                              maxHeight: 420,
+                              overflowY: "auto",
+                              border: "1px solid var(--line)",
+                              borderRadius: 10,
+                              padding: 14,
+                              marginBottom: 14,
+                            }}
+                          >
+                            {detail.bodyText || "본문 내용이 없어요."}
+                          </div>
+
+                          {detail.attachment ? (
+                            <>
+                              <p className="hint" style={{ marginBottom: 10 }}>
+                                첨부파일: {detail.attachment.fileName}
+                              </p>
+                              <a
+                                className="btn btn-secondary"
+                                href={`/api/sh-notices/${detail.seq}/pdf`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                PDF 새 창에서 보기 / 다운로드
+                              </a>
+                              {looksLikeApplicationNotice(detail.title) && (
+                                <button
+                                  className="btn btn-primary"
+                                  disabled={importing}
+                                  onClick={() => importAndAnalyze(detail.seq)}
+                                >
+                                  {importing ? "PDF를 가져오는 중…" : "이 공고문으로 분석 시작하기"}
+                                </button>
+                              )}
+                              {importError && (
+                                <div className="error-box" style={{ marginTop: 10 }}>
+                                  {importError}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <p className="hint">이 글에는 첨부파일이 없어요.</p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
-              <p className="hint" style={{ marginTop: 6 }}>
-                {item.dept} · {item.date} · 조회 {item.views}
-              </p>
-            </div>
-          ))}
+            );
+          })}
 
           {shItems && shItems.length > 0 && (
             <div className="row" style={{ marginBottom: 14 }}>
@@ -199,62 +284,6 @@ export default function NoticesPage() {
               <button className="btn btn-ghost" onClick={() => setShPage((p) => p + 1)}>
                 다음 페이지
               </button>
-            </div>
-          )}
-
-          {selectedSeq && (
-            <div className="card" style={{ borderColor: "var(--brand)" }}>
-              {detailLoading && <div className="spinner-text">공고 내용을 불러오는 중…</div>}
-              {detailError && <div className="error-box">{detailError}</div>}
-              {detail && (
-                <>
-                  <h2 style={{ marginBottom: 10 }}>{detail.title}</h2>
-                  <div
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      fontSize: 13.5,
-                      lineHeight: 1.7,
-                      color: "#3a423e",
-                      maxHeight: 420,
-                      overflowY: "auto",
-                      border: "1px solid var(--line)",
-                      borderRadius: 10,
-                      padding: 14,
-                      marginBottom: 14,
-                    }}
-                  >
-                    {detail.bodyText || "본문 내용이 없어요."}
-                  </div>
-
-                  {detail.attachment ? (
-                    <>
-                      <p className="hint" style={{ marginBottom: 10 }}>
-                        첨부파일: {detail.attachment.fileName}
-                      </p>
-                      <a
-                        className="btn btn-secondary"
-                        href={`/api/sh-notices/${detail.seq}/pdf`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        PDF 새 창에서 보기 / 다운로드
-                      </a>
-                      {looksLikeApplicationNotice(detail.title) && (
-                        <button
-                          className="btn btn-primary"
-                          disabled={importing}
-                          onClick={() => importAndAnalyze(detail.seq)}
-                        >
-                          {importing ? "PDF를 가져오는 중…" : "이 공고문으로 분석 시작하기"}
-                        </button>
-                      )}
-                      {importError && <div className="error-box" style={{ marginTop: 10 }}>{importError}</div>}
-                    </>
-                  ) : (
-                    <p className="hint">이 글에는 첨부파일이 없어요.</p>
-                  )}
-                </>
-              )}
             </div>
           )}
         </>

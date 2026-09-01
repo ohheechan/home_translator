@@ -292,6 +292,59 @@ a {
   padding: 40px 0;
 }
 
+/* 공고 목록 아코디언 — 클릭한 공고 카드 바로 아래에서 상세 패널이 슬라이드로 펼쳐진다. */
+.notice-item {
+  margin-bottom: 14px;
+}
+
+.notice-card {
+  margin-bottom: 0;
+  transition: border-color 160ms ease, border-bottom-left-radius 160ms ease, border-bottom-right-radius 160ms ease;
+}
+
+.notice-card.open {
+  border-color: var(--brand);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.notice-chevron {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 200ms ease, color 200ms ease;
+}
+
+.notice-chevron.open {
+  transform: rotate(180deg);
+  color: var(--brand);
+}
+
+.notice-detail-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms ease;
+}
+
+.notice-detail-collapse.open {
+  grid-template-rows: 1fr;
+}
+
+.notice-detail-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.notice-detail-card {
+  margin-top: -1px;
+  margin-bottom: 0;
+  border-color: var(--brand);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top: none;
+}
+
 .score-row {
   display: flex;
   justify-content: space-between;
