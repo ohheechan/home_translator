@@ -17,6 +17,9 @@ export default function Home({ onStart }: { onStart: () => void }) {
       <button className="btn btn-primary" onClick={onStart}>
         시작하기
       </button>
+      <a href="/notices" className="btn btn-secondary" style={{ textDecoration: "none" }}>
+        진행 중인 공고 둘러보기
+      </a>
       <p className="disclaimer">
         이 서비스는 참고용 예비 추정 도구입니다. 법적 효력이 없으며, 실제 자격은 서류심사
         시 공적자료로 최종 확인됩니다.

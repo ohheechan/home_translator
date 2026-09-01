@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Step, WizardState } from "./types";
 import { initialWizardState } from "./types";
+import { analyzePdfBase64 } from "../../parser/analyze-pdf";
 import Home from "./screens/Home";
 import Upload from "./screens/Upload";
 import TierB from "./screens/TierB";
@@ -30,6 +31,28 @@ export default function Wizard() {
   function reset() {
     setState(initialWizardState);
   }
+
+  // "공고 둘러보기"에서 "이 공고문으로 분석 시작하기"를 누르면 여기로 돌아온다 —
+  // 사용자가 PDF를 다시 손으로 고를 필요 없이 자동으로 분석까지 이어간다.
+  useEffect(() => {
+    const pending = sessionStorage.getItem("importPdfBase64");
+    if (!pending) return;
+    sessionStorage.removeItem("importPdfBase64");
+    sessionStorage.removeItem("importPdfName");
+    setState((prev) => ({ ...prev, step: "upload", loading: true, errorMessage: null }));
+    analyzePdfBase64(pending)
+      .then(({ doc, nextStep }) => {
+        setState((prev) => ({ ...prev, loading: false, doc, step: nextStep }));
+      })
+      .catch((e: unknown) => {
+        setState((prev) => ({
+          ...prev,
+          loading: false,
+          errorMessage: e instanceof Error ? e.message : "공고문을 분석하지 못했어요.",
+        }));
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const progressIndex = MAIN_FLOW_STEPS.indexOf(state.step);
 
